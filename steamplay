@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.4.1"
+VERSION="1.4.2"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -50,8 +50,9 @@ AVX="1"                   # Rosetta 2 公告 AVX 支援（macOS 15+，部分遊�
 HUD="0"                   # Metal 效能 HUD
 RETINA="0"                # Retina 原生解析度（HiDPI；關閉可提升效能）
 WINEDEBUG_SETTING="-all"  # 關閉 wine 除錯輸出以提升效能
-# CEF 的 GPU 加速在 Wine 下會造成 steamwebhelper 無回應，預設停用
-STEAM_FLAGS="-noreactlogin -nofriendsui -cef-disable-gpu -cef-disable-gpu-compositing"
+# GPTK 上 64 位元 CEF（steamwebhelper）會無回應/介面空白/文字變方塊；
+# 社群驗證的正解是強制 32 位元 CEF，再關掉 CEF 的 GPU 加速輔助。
+STEAM_FLAGS="-noreactlogin -nofriendsui -allosarches -cef-force-32bit -cef-disable-gpu"
 DXVK_ASYNC="1"            # 使用 DXVK 時啟用非同步 shader 編譯，減少卡頓
 
 load_config() {
