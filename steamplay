@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -142,12 +142,16 @@ find_wine() {
     return 1
 }
 
-wine_or_die() {
-    find_wine || die "找不到 Wine。請先執行：steamplay setup"
+# 注意：不要寫成 wine=$(func_that_dies)——die 在命令替換的子 shell 裡
+# 只會結束子 shell，主程式會拿到空字串繼續跑
+require_wine() {
+    find_wine >/dev/null 2>&1 || \
+        die "找不到 Wine 引擎。請先執行：steamplay setup"
 }
 
 wineserver_bin() {
-    local wine; wine=$(wine_or_die)
+    local wine
+    wine=$(find_wine) || { echo ""; return 0; }
     local ws="$(dirname "$wine")/wineserver"
     [[ -x "$ws" ]] && echo "$ws" || echo ""
 }
@@ -175,7 +179,8 @@ wine_env() {
 }
 
 run_wine() {
-    local wine; wine=$(wine_or_die)
+    local wine
+    wine=$(find_wine) || die "找不到 Wine 引擎。請先執行：steamplay setup"
     wine_env
     if is_apple_silicon && [[ "$ENGINE" == "gptk" ]]; then
         arch -x86_64 "$wine" "$@"
@@ -262,14 +267,15 @@ cmd_setup() {
 
     init_prefix
 
-    cmd_shortcut --panel >/dev/null 2>&1 || true
-
     msg "環境安裝完成"
-    info "已建立「Steamplay 控制台」App（用 Spotlight 搜尋「Steamplay」即可開圖形介面）"
+    if cmd_shortcut --panel >/dev/null 2>&1; then
+        info "已建立「Steamplay 控制台」App（用 Spotlight 搜尋「Steamplay」即可開圖形介面）"
+    fi
     info "下一步：steamplay install-steam"
 }
 
 init_prefix() {
+    require_wine
     if [[ ! -f "$PREFIX/system.reg" ]]; then
         msg "初始化 Wine prefix：$PREFIX"
         mkdir -p "$PREFIX"
@@ -315,6 +321,7 @@ steam_exe_path() {
 
 cmd_install_steam() {
     require_macos
+    require_wine
     ensure_dirs
     init_prefix
 
@@ -345,6 +352,7 @@ cmd_install_steam() {
 
 cmd_steam() {
     require_macos
+    require_wine
     local exe; exe=$(steam_exe_path)
     [[ -f "$exe" ]] || die "尚未安裝 Windows 版 Steam，請先執行：steamplay install-steam"
 
@@ -362,6 +370,7 @@ cmd_launch() {
     [[ -n "$appid" ]] || die "用法：steamplay launch <Steam AppID>\n（AppID 可在 steamdb.info 查詢）"
     shift
 
+    require_wine
     local exe; exe=$(steam_exe_path)
     [[ -f "$exe" ]] || die "尚未安裝 Windows 版 Steam，請先執行：steamplay install-steam"
 
@@ -377,6 +386,7 @@ cmd_launch() {
 
 cmd_run() {
     require_macos
+    require_wine
     local exe="${1:-}"
     [[ -n "$exe" ]] || die "用法：steamplay run <exe路徑> [參數...]"
     shift
@@ -479,7 +489,7 @@ cmd_tweak() {
     }
     local wt wine
     wt=$(winetricks_bin) || die "找不到 winetricks，請先執行：steamplay setup"
-    wine=$(wine_or_die)
+    wine=$(find_wine) || die "找不到 Wine 引擎。請先執行：steamplay setup"
     wine_env
     msg "套用修正：$verb"
     WINE="$wine" "$wt" --unattended "$@"
@@ -587,7 +597,8 @@ if [[ -z "\$SP" || ! -x "\$SP" ]]; then
 fi
 
 out=\$("\$SP" $target_cmd 2>&1) || {
-    show_error "啟動失敗：\$(printf '%s' "\$out" | tail -c 900)"
+    # tail -c 會把多位元組 UTF-8 字元切半，用 iconv -c 丟棄無效序列
+    show_error "啟動失敗：\$(printf '%s' "\$out" | tail -c 900 | /usr/bin/iconv -f UTF-8 -t UTF-8 -c 2>/dev/null)"
     exit 1
 }
 EOF
@@ -761,15 +772,23 @@ cmd_ui() {
                 if [[ ! -f "$(steam_exe_path)" ]]; then
                     ui_alert "尚未安裝 Windows 版 Steam。請先執行選單中的「步驟一：安裝環境」，完成後再執行「步驟二：安裝 Windows 版 Steam」。"
                 else
-                    "$self" steam >/dev/null 2>&1 || true
-                    ui_notify "Windows Steam 啟動中（第一次啟動會自我更新，請稍候 1–2 分鐘）"
+                    local out
+                    if out=$("$self" steam 2>&1); then
+                        ui_notify "Windows Steam 啟動中（第一次啟動會自我更新，請稍候 1–2 分鐘）"
+                    else
+                        ui_alert "啟動失敗：$out"
+                    fi
                 fi ;;
             "🚀 直接啟動遊戲（輸入 AppID）")
                 local appid
                 appid=$(ui_prompt "輸入遊戲的 Steam AppID（數字，可在 steamdb.info 查詢）：" "")
                 if [[ "$appid" =~ ^[0-9]+$ ]]; then
-                    "$self" launch "$appid" >/dev/null 2>&1 || true
-                    ui_notify "AppID $appid 啟動中"
+                    local lout
+                    if lout=$("$self" launch "$appid" 2>&1); then
+                        ui_notify "AppID $appid 啟動中"
+                    else
+                        ui_alert "啟動失敗：$lout"
+                    fi
                 elif [[ -n "$appid" ]]; then
                     ui_alert "AppID 必須是數字。"
                 fi ;;
@@ -969,6 +988,15 @@ EOF
 main() {
     ensure_dirs 2>/dev/null || true
     load_config
+
+    # macOS 預設的 zsh 互動模式不把「#」當註解：使用者照文件貼上
+    # 「steamplay setup  # 說明文字」時，註解會變成參數混進來，一律丟棄
+    local _args=() _a
+    for _a in "$@"; do
+        [[ "$_a" == \#* ]] && break
+        _args+=("$_a")
+    done
+    set -- ${_args[@]+"${_args[@]}"}
 
     local cmd="${1:-help}"; shift || true
     case "$cmd" in
