@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.3.4"
+VERSION="1.4.0"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -50,7 +50,8 @@ AVX="1"                   # Rosetta 2 公告 AVX 支援（macOS 15+，部分遊�
 HUD="0"                   # Metal 效能 HUD
 RETINA="0"                # Retina 原生解析度（HiDPI；關閉可提升效能）
 WINEDEBUG_SETTING="-all"  # 關閉 wine 除錯輸出以提升效能
-STEAM_FLAGS="-noreactlogin -nofriendsui"
+# CEF 的 GPU 加速在 Wine 下會造成 steamwebhelper 無回應，預設停用
+STEAM_FLAGS="-noreactlogin -nofriendsui -cef-disable-gpu -cef-disable-gpu-compositing"
 DXVK_ASYNC="1"            # 使用 DXVK 時啟用非同步 shader 編譯，減少卡頓
 
 load_config() {
@@ -64,7 +65,11 @@ save_config_key() {
     mkdir -p "$STEAMPLAY_HOME"
     touch "$CONFIG_FILE"
     if grep -q "^${key}=" "$CONFIG_FILE"; then
-        sed -i '' "s|^${key}=.*|${key}=\"${value}\"|" "$CONFIG_FILE"
+        if sed --version >/dev/null 2>&1; then
+            sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$CONFIG_FILE"      # GNU sed
+        else
+            sed -i '' "s|^${key}=.*|${key}=\"${value}\"|" "$CONFIG_FILE"   # BSD sed (macOS)
+        fi
     else
         printf '%s="%s"\n' "$key" "$value" >> "$CONFIG_FILE"
     fi
@@ -330,6 +335,8 @@ init_prefix() {
 }
 
 apply_mac_driver_tweaks() {
+    # 無 Wine 時無可套用；不能讓 run_wine 的 die 穿透 || true 殺掉呼叫端（如 UI 迴圈）
+    find_wine >/dev/null 2>&1 || return 0
     local retina_val="n"
     [[ "$RETINA" == "1" ]] && retina_val="y"
     run_wine reg add 'HKCU\Software\Wine\Mac Driver' /v RetinaMode /t REG_SZ /d "$retina_val" /f >/dev/null 2>&1 || true
@@ -618,10 +625,10 @@ cmd_shortcut() {
     # 寫進 stub 時以單引號包裹，路徑中的 $、反引號、雙引號才不會被二次展開
     local self_sq; self_sq=$(printf '%s' "$self" | sed "s/'/'\\\\''/g")
     local app_dir="$HOME/Applications/$label.app"
-    mkdir -p "$app_dir/Contents/MacOS"
 
     # LSUIElement：捷徑本身不佔 Dock，遊戲視窗照常顯示
-    cat > "$app_dir/Contents/Info.plist" <<EOF
+    local plist_content
+    plist_content=$(cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -643,10 +650,12 @@ cmd_shortcut() {
 </dict>
 </plist>
 EOF
+)
 
     # Finder 啟動的程序 PATH 極簡且丟棄輸出，stub 需自備 PATH、
     # 後備路徑解析，並在失敗時以原生對話框回報（不能無聲死掉）
-    cat > "$app_dir/Contents/MacOS/launcher" <<EOF
+    local launcher_content
+    launcher_content=$(cat <<EOF
 #!/bin/bash
 export PATH="/opt/homebrew/bin:/usr/local/bin:\$HOME/.local/bin:\$PATH"
 
@@ -674,12 +683,21 @@ out=\$("\$SP" $target_cmd 2>&1) || {
     exit 1
 }
 EOF
-    chmod +x "$app_dir/Contents/MacOS/launcher"
+)
 
-    command -v codesign >/dev/null 2>&1 && \
-        codesign --force -s - "$app_dir" >/dev/null 2>&1 || true
-
-    ok "已建立捷徑：$app_dir"
+    # 內容沒變就不重寫、不重簽，避免 Gatekeeper 把既有捷徑當成新 App 重新驗證
+    if [[ "$(cat "$app_dir/Contents/Info.plist" 2>/dev/null)" == "$plist_content" && \
+          "$(cat "$app_dir/Contents/MacOS/launcher" 2>/dev/null)" == "$launcher_content" ]]; then
+        ok "捷徑已是最新：$app_dir"
+    else
+        mkdir -p "$app_dir/Contents/MacOS"
+        printf '%s\n' "$plist_content"   > "$app_dir/Contents/Info.plist"
+        printf '%s\n' "$launcher_content" > "$app_dir/Contents/MacOS/launcher"
+        chmod +x "$app_dir/Contents/MacOS/launcher"
+        command -v codesign >/dev/null 2>&1 && \
+            codesign --force -s - "$app_dir" >/dev/null 2>&1 || true
+        ok "已建立捷徑：$app_dir"
+    fi
     info "位置：~/Applications（注意：Finder 側邊欄的「應用程式」是 /Applications，是另一個資料夾）"
     info "用 Spotlight（⌘空白鍵）搜尋「${label}」即可開啟；執行 open ~/Applications 可把它拖進 Dock。"
 
@@ -740,12 +758,15 @@ end run' "$1" >/dev/null 2>&1 || true
 
 ui_terminal() {
     # 長時間工作（setup/install/tweak）開 Terminal 視窗跑，讓使用者看得到進度
-    /usr/bin/osascript -e 'on run argv
+    if ! /usr/bin/osascript -e 'on run argv
 tell application "Terminal"
 activate
 do script (item 1 of argv)
 end tell
-end run' "$1" >/dev/null 2>&1 || true
+end run' "$1" >/dev/null 2>&1; then
+        # 最常見原因：TCC 自動化權限被拒（error -1743），不能無聲失敗
+        ui_alert "無法開啟終端機視窗。若剛才拒絕過權限請求，請到「系統設定 → 隱私權與安全性 → 自動化」允許控制 Terminal；或直接手動在終端機執行：$1"
+    fi
 }
 
 ui_menu_shortcut() {
@@ -758,22 +779,35 @@ ui_menu_shortcut() {
         "Steamplay 控制台（本視窗）")
     case "$sub" in
         "Windows Steam")
-            "$self" shortcut >/dev/null 2>&1 || true
-            ui_alert "已建立「Windows Steam」捷徑到 ~/Applications。用 Spotlight（⌘空白鍵）搜尋「Windows Steam」即可開啟。" ;;
+            if "$self" shortcut >/dev/null 2>&1; then
+                ui_alert "已建立「Windows Steam」捷徑到 ~/Applications。用 Spotlight（⌘空白鍵）搜尋「Windows Steam」即可開啟。"
+            else
+                ui_alert "建立捷徑失敗。請在終端機執行 steamplay shortcut 查看原因。"
+            fi ;;
         "Windows Steam（開機自動啟動）")
-            "$self" shortcut --login >/dev/null 2>&1 || true
-            ui_alert "已建立捷徑並加入登入項目，開機後會自動啟動 Windows Steam。" ;;
+            if "$self" shortcut --login >/dev/null 2>&1; then
+                ui_alert "已建立捷徑並加入登入項目，開機後會自動啟動 Windows Steam。"
+            else
+                ui_alert "建立捷徑失敗。請在終端機執行 steamplay shortcut --login 查看原因。"
+            fi ;;
         "單一遊戲（輸入 AppID）")
             local appid gname
             appid=$(ui_prompt "輸入遊戲的 Steam AppID（數字，可在 steamdb.info 查詢）：" "")
+            appid="${appid//[[:space:]]/}"
             [[ -n "$appid" ]] || return 0
             if [[ ! "$appid" =~ ^[0-9]+$ ]]; then ui_alert "AppID 必須是數字。"; return 0; fi
             gname=$(ui_prompt "捷徑顯示名稱（例如遊戲名）：" "Steam 遊戲 $appid")
-            "$self" shortcut "$appid" "${gname:-Steam 遊戲 $appid}" >/dev/null 2>&1 || true
-            ui_alert "已建立「${gname:-Steam 遊戲 $appid}」捷徑，雙擊即可直接進遊戲。" ;;
+            if "$self" shortcut "$appid" "${gname:-Steam 遊戲 $appid}" >/dev/null 2>&1; then
+                ui_alert "已建立「${gname:-Steam 遊戲 $appid}」捷徑，雙擊即可直接進遊戲。"
+            else
+                ui_alert "建立捷徑失敗。請在終端機執行 steamplay shortcut $appid 查看原因。"
+            fi ;;
         "Steamplay 控制台（本視窗）")
-            "$self" shortcut --panel >/dev/null 2>&1 || true
-            ui_alert "已建立「Steamplay 控制台」捷徑，之後用 Spotlight 搜尋「Steamplay」即可打開本介面。" ;;
+            if "$self" shortcut --panel >/dev/null 2>&1; then
+                ui_alert "已建立「Steamplay 控制台」捷徑，之後用 Spotlight 搜尋「Steamplay」即可打開本介面。"
+            else
+                ui_alert "建立捷徑失敗。請在終端機執行 steamplay shortcut --panel 查看原因。"
+            fi ;;
     esac
 }
 
@@ -802,7 +836,10 @@ ui_menu_settings() {
             "檢視完整設定")
         case "$sub" in
             "效能 HUD"*)      save_config_key HUD "$([[ "$HUD" == 1 ]] && echo 0 || echo 1)" ;;
-            "Retina 高解析度"*) save_config_key RETINA "$([[ "$RETINA" == 1 ]] && echo 0 || echo 1)" ;;
+            "Retina 高解析度"*)
+                save_config_key RETINA "$([[ "$RETINA" == 1 ]] && echo 0 || echo 1)"
+                load_config
+                apply_mac_driver_tweaks >/dev/null 2>&1 || true ;;
             "同步機制"*)
                 case "$SYNC" in
                     msync) save_config_key SYNC esync ;;
@@ -820,6 +857,10 @@ cmd_ui() {
     require_macos
     local self; self=$(resolve_self)
     local selfq; selfq=$(printf '%q' "$self")
+    # Terminal do script 開的是全新 login shell，自訂的 STEAMPLAY_HOME 要顯式帶過去
+    if [[ "$STEAMPLAY_HOME" != "$HOME/.steamplay" ]]; then
+        selfq="STEAMPLAY_HOME=$(printf '%q' "$STEAMPLAY_HOME") $selfq"
+    fi
 
     while :; do
         local st_wine="未安裝" st_steam="未安裝"
@@ -854,6 +895,7 @@ cmd_ui() {
             "🚀 直接啟動遊戲（輸入 AppID）")
                 local appid
                 appid=$(ui_prompt "輸入遊戲的 Steam AppID（數字，可在 steamdb.info 查詢）：" "")
+                appid="${appid//[[:space:]]/}"
                 if [[ "$appid" =~ ^[0-9]+$ ]]; then
                     local lout
                     if lout=$("$self" launch "$appid" 2>&1); then
@@ -906,7 +948,7 @@ cmd_config() {
             [[ -n "$key" && -n "$value" ]] || die "用法：steamplay config set KEY VALUE"
             save_config_key "$key" "$value"
             ok "已設定 $key=$value"
-            [[ "$key" == "RETINA" ]] && { load_config; apply_mac_driver_tweaks; }
+            [[ "$key" == "RETINA" ]] && { load_config; apply_mac_driver_tweaks; } || true
             ;;
         *) die "用法：steamplay config [show|set KEY VALUE]" ;;
     esac
