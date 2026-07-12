@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -483,6 +483,99 @@ cmd_tweak() {
 }
 
 # ---------------------------------------------------------------------------
+# macOS App 捷徑：把 steamplay 包成可雙擊的 .app，免終端機
+# ---------------------------------------------------------------------------
+
+resolve_self() {
+    local src="${BASH_SOURCE[0]}"
+    while [[ -L "$src" ]]; do
+        local dir; dir=$(cd -P "$(dirname "$src")" && pwd)
+        src=$(readlink "$src")
+        [[ "$src" != /* ]] && src="$dir/$src"
+    done
+    echo "$(cd -P "$(dirname "$src")" && pwd)/$(basename "$src")"
+}
+
+cmd_shortcut() {
+    require_macos
+    local appid="" name="" login=0 arg
+    for arg in "$@"; do
+        case "$arg" in
+            --login) login=1 ;;
+            *) if [[ -z "$appid" ]]; then appid="$arg"; else name="$arg"; fi ;;
+        esac
+    done
+
+    local label bundle_id target_cmd
+    if [[ -z "$appid" ]]; then
+        label="Windows Steam"
+        bundle_id="dev.steamplay.steam"
+        target_cmd="steam"
+    else
+        [[ "$appid" =~ ^[0-9]+$ ]] || \
+            die "AppID 必須是數字（可在 steamdb.info 查詢），例如：steamplay shortcut 1091500 \"Cyberpunk 2077\""
+        label="${name:-Steam 遊戲 $appid}"
+        bundle_id="dev.steamplay.app$appid"
+        target_cmd="launch $appid"
+    fi
+
+    # 「/」「:」是 Finder 保留字元；引號會破壞產生的腳本，一併換掉
+    label=$(printf '%s' "$label" | tr '/:"' '---')
+    local label_xml
+    label_xml=$(printf '%s' "$label" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+
+    local self; self=$(resolve_self)
+    local app_dir="$HOME/Applications/$label.app"
+    mkdir -p "$app_dir/Contents/MacOS"
+
+    # LSUIElement：捷徑本身不佔 Dock，遊戲視窗照常顯示
+    cat > "$app_dir/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>$label_xml</string>
+	<key>CFBundleDisplayName</key>
+	<string>$label_xml</string>
+	<key>CFBundleIdentifier</key>
+	<string>$bundle_id</string>
+	<key>CFBundleExecutable</key>
+	<string>launcher</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$VERSION</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>
+EOF
+
+    cat > "$app_dir/Contents/MacOS/launcher" <<EOF
+#!/bin/bash
+exec "$self" $target_cmd
+EOF
+    chmod +x "$app_dir/Contents/MacOS/launcher"
+
+    command -v codesign >/dev/null 2>&1 && \
+        codesign --force -s - "$app_dir" >/dev/null 2>&1 || true
+
+    ok "已建立捷徑：$app_dir"
+    info "從 Launchpad 或 Finder 的「應用程式」雙擊即可啟動，也可拖進 Dock。"
+
+    if [[ "$login" == "1" ]]; then
+        if osascript -e "tell application \"System Events\" to make login item at end with properties {path:\"$app_dir\", hidden:false}" >/dev/null 2>&1; then
+            ok "已加入登入項目：開機後自動啟動 $label"
+        else
+            warn "加入登入項目失敗，可到「系統設定 → 一般 → 登入項目」手動加入。"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # 管理指令
 # ---------------------------------------------------------------------------
 
@@ -632,6 +725,8 @@ ${c_bold}快速開始（三步驟）：${c_rst}
   steamplay steam            啟動 Windows 版 Steam，登入後即可下載遊戲
 
 ${c_bold}日常使用：${c_rst}
+  steamplay shortcut              建立「Windows Steam」App 捷徑（之後雙擊即開，免終端機）
+  steamplay shortcut <AppID> [名稱]  為單一遊戲建立 App 捷徑（--login 開機自動啟動）
   steamplay steam                 啟動 Windows 版 Steam
   steamplay launch <AppID>        直接啟動某款遊戲（AppID 見 steamdb.info）
   steamplay run <exe> [args]      執行任意 Windows 程式
@@ -664,6 +759,7 @@ main() {
         steam)          cmd_steam "$@" ;;
         launch)         cmd_launch "$@" ;;
         run)            cmd_run "$@" ;;
+        shortcut)       cmd_shortcut "$@" ;;
         game)           cmd_game "$@" ;;
         tweak)          cmd_tweak "$@" ;;
         gptk-libs)      cmd_gptk_libs "$@" ;;

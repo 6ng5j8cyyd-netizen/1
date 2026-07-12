@@ -33,4 +33,5 @@ echo
 echo "下一步："
 echo "  steamplay setup           # 安裝 Wine 引擎"
 echo "  steamplay install-steam   # 安裝 Windows 版 Steam"
+echo "  steamplay shortcut        # 建立可雙擊的 App 捷徑（之後免終端機）"
 echo "  steamplay steam           # 開始玩！"

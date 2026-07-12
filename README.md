@@ -30,10 +30,21 @@ steamplay install-steam    # 2. 下載並安裝 Windows 版 Steam 到相容層�
 steamplay steam            # 3. 啟動 Windows 版 Steam，登入帳號後即可下載 Windows 遊戲
 ```
 
-之後日常使用只需要 `steamplay steam`，在 Steam 介面裡照常下載、啟動遊戲即可。也可以跳過 Steam 介面直接啟動某款遊戲：
+## 日常使用：像一般 Mac App 一樣雙擊啟動（免終端機）
+
+設定只需做一次。之後**不需要每次開終端機**——建立 App 捷徑後，從 Launchpad、Spotlight 或 Dock 雙擊即可：
 
 ```bash
-steamplay launch 1091500   # 用 AppID 直接啟動（AppID 可在 steamdb.info 查詢）
+steamplay shortcut                            # 建立「Windows Steam.app」到 ~/Applications
+steamplay shortcut --login                    # 同上，並設定開機自動啟動 Steam
+steamplay shortcut 1091500 "Cyberpunk 2077"   # 為單一遊戲建立捷徑，雙擊直接進遊戲
+```
+
+啟動 Windows 版 Steam 後，瀏覽商店、下載遊戲、按「開始遊戲」都在 Steam 自己的視窗裡完成，和在 Windows PC 上的體驗相同；`steamplay`（或捷徑）只負責「把 Steam 打開」這一步。當然也可以繼續用指令：
+
+```bash
+steamplay steam            # 從終端機啟動 Windows 版 Steam
+steamplay launch 1091500   # 跳過 Steam 介面直接啟動某款遊戲（AppID 見 steamdb.info）
 ```
 
 ## 運作原理
@@ -121,7 +132,9 @@ steamplay kill                       # 遊戲卡死時強制關閉所有 Windows
 
 ## 指令總覽
 
-執行 `steamplay help` 查看完整指令清單：`setup`、`install-steam`、`steam`、`launch`、`run`、`game`、`tweak`、`gptk-libs`、`config`、`prefix`、`kill`、`logs`、`doctor`。
+執行 `steamplay help` 查看完整指令清單：`setup`、`install-steam`、`steam`、`shortcut`、`launch`、`run`、`game`、`tweak`、`gptk-libs`、`config`、`prefix`、`kill`、`logs`、`doctor`。
+
+（捷徑不想要了？直接把 `~/Applications` 裡的 .app 拖到垃圾桶即可。）
 
 ## 授權
 
