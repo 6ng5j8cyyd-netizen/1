@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.3.3"
+VERSION="1.3.4"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -969,6 +969,13 @@ cmd_logs() {
     [[ -n "${latest:-}" ]] || die "尚無記錄檔"
     msg "最新記錄：$latest"
     tail -n 100 "$latest"
+
+    # Steam 自我更新常無視窗；它的進度寫在自己的 bootstrap 記錄裡
+    local bl="$PREFIX/drive_c/Program Files (x86)/Steam/logs/bootstrap_log.txt"
+    if [[ -f "$bl" ]]; then
+        msg "Steam 更新進度（bootstrap_log.txt 最後 15 行；持續盯著看：tail -f 該檔案）"
+        tail -n 15 "$bl"
+    fi
 }
 
 # ---------------------------------------------------------------------------
