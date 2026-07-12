@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.2.2"
+VERSION="1.3.0"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -43,7 +43,7 @@ bad()  { printf '  %s✘%s %s\n' "$c_red" "$c_rst" "$1"; }
 # ---------------------------------------------------------------------------
 
 # 全域預設值（可用 `steamplay config set KEY VALUE` 覆寫）
-ENGINE="crossover"        # crossover | gptk | custom
+ENGINE="auto"             # auto | gptk | stable | crossover | custom
 WINE_BIN=""               # engine=custom 時的 wine 執行檔路徑
 SYNC="msync"              # msync | esync | none
 AVX="1"                   # Rosetta 2 公告 AVX 支援（macOS 15+，部分遊戲必需）
@@ -113,32 +113,59 @@ native_brew() {
 # Wine 引擎
 # ---------------------------------------------------------------------------
 
+# GPTK v3 起以 cask 發佈：原生 App、內含 D3DMetal、自動處理隔離與簽章
+GPTK_APP_WINE="/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64"
+
 find_wine() {
-    # 回傳 wine 執行檔路徑；依 ENGINE 設定尋找
+    # 回傳 wine 執行檔路徑；依 ENGINE 設定尋找（auto 依效能優先順序探測）
+    local candidates=()
     case "$ENGINE" in
         custom)
-            [[ -x "$WINE_BIN" ]] && { echo "$WINE_BIN"; return 0; }
+            candidates=("$WINE_BIN")
             ;;
         gptk)
-            local bp
-            if bp=$(arch -x86_64 /usr/local/bin/brew --prefix game-porting-toolkit 2>/dev/null); then
-                [[ -x "$bp/bin/wine64" ]] && { echo "$bp/bin/wine64"; return 0; }
-            fi
+            candidates=("$GPTK_APP_WINE" "$HOME$GPTK_APP_WINE")
             ;;
-        crossover|*)
-            local p
-            for p in \
-                "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine64" \
-                "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine" \
-                "/Applications/Wine Staging.app/Contents/Resources/wine/bin/wine64" \
+        crossover)
+            candidates=(
+                "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine64"
+                "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine"
+            )
+            ;;
+        stable)
+            candidates=(
                 "/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine64"
-            do
-                [[ -x "$p" ]] && { echo "$p"; return 0; }
-            done
-            command -v wine64 2>/dev/null && return 0
-            command -v wine 2>/dev/null && return 0
+                "/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine"
+            )
+            ;;
+        auto|*)
+            candidates=(
+                "$GPTK_APP_WINE" "$HOME$GPTK_APP_WINE"
+                "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine64"
+                "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine"
+                "/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine64"
+                "/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine"
+                "/Applications/Wine Staging.app/Contents/Resources/wine/bin/wine64"
+            )
             ;;
     esac
+
+    local p
+    for p in ${candidates[@]+"${candidates[@]}"}; do
+        [[ -n "$p" && -x "$p" ]] && { echo "$p"; return 0; }
+    done
+
+    # 舊版 GPTK（x86_64 Homebrew formula）安裝的位置
+    if [[ "$ENGINE" == "gptk" || "$ENGINE" == "auto" ]]; then
+        local bp
+        if [[ -x /usr/local/bin/brew ]] && \
+           bp=$(arch -x86_64 /usr/local/bin/brew --prefix game-porting-toolkit 2>/dev/null); then
+            [[ -x "$bp/bin/wine64" ]] && { echo "$bp/bin/wine64"; return 0; }
+        fi
+    fi
+
+    command -v wine64 2>/dev/null && return 0
+    command -v wine 2>/dev/null && return 0
     return 1
 }
 
@@ -182,11 +209,8 @@ run_wine() {
     local wine
     wine=$(find_wine) || die "找不到 Wine 引擎。請先執行：steamplay setup"
     wine_env
-    if is_apple_silicon && [[ "$ENGINE" == "gptk" ]]; then
-        arch -x86_64 "$wine" "$@"
-    else
-        "$wine" "$@"
-    fi
+    # x86_64 的 wine 由 macOS 自動透過 Rosetta 執行，毋須 arch 包裝
+    "$wine" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -205,6 +229,15 @@ cmd_setup() {
         esac
     done
 
+    # auto：Apple Silicon + macOS 14+ 用 GPTK（效能最佳），其餘用 WineHQ stable
+    if [[ "$engine" == "auto" ]]; then
+        if is_apple_silicon && [[ "$(macos_major)" -ge 14 ]]; then
+            engine="gptk"
+        else
+            engine="stable"
+        fi
+    fi
+
     msg "steamplay 環境安裝（引擎：${engine}）"
 
     if is_apple_silicon; then
@@ -221,33 +254,40 @@ cmd_setup() {
     local brew
     brew=$(native_brew) || die "找不到 Homebrew。請先安裝：https://brew.sh"
     ok "Homebrew：$($brew --prefix)"
+    # 新版 brew 預設會逐項詢問確認；舊版 brew 會忽略這些環境變數
+    export HOMEBREW_NO_ASK=1 HOMEBREW_NO_ENV_HINTS=1
 
+    ENGINE="$engine"
     case "$engine" in
-        crossover)
-            msg "安裝 Wine（Gcenx wine-crossover 建置，含 MSYNC 與 CrossOver 修補）"
+        gptk)
+            is_apple_silicon || die "Game Porting Toolkit 僅支援 Apple Silicon（Intel 請用 --engine stable）。"
+            [[ "$(macos_major)" -ge 14 ]] || die "Game Porting Toolkit 需要 macOS 14 Sonoma 以上（可改用 --engine stable）。"
+            msg "安裝 Apple Game Porting Toolkit v3（內含 D3DMetal，DX11/DX12 效能最佳）"
             $brew tap gcenx/wine >/dev/null
             if ! find_wine >/dev/null 2>&1; then
-                $brew install --cask --no-quarantine gcenx/wine/wine-crossover
+                $brew install --cask gcenx/wine/game-porting-toolkit
             fi
             ;;
-        gptk)
-            is_apple_silicon || die "Game Porting Toolkit 僅支援 Apple Silicon。"
-            msg "安裝 Apple Game Porting Toolkit（D3DMetal，DX11/DX12 效能最佳）"
-            if [[ ! -x /usr/local/bin/brew ]]; then
-                info "安裝 x86_64 版 Homebrew 到 /usr/local ..."
-                arch -x86_64 /bin/bash -c \
-                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        stable)
+            msg "安裝 WineHQ 官方 wine-stable"
+            if ! find_wine >/dev/null 2>&1; then
+                $brew install --cask wine-stable
+                # 新版 brew 已移除 --no-quarantine，改為事後移除隔離屬性
+                xattr -dr com.apple.quarantine "/Applications/Wine Stable.app" 2>/dev/null || true
             fi
-            arch -x86_64 /usr/local/bin/brew tap gcenx/wine >/dev/null
-            arch -x86_64 /usr/local/bin/brew install gcenx/wine/game-porting-toolkit ||
-                warn "GPTK 編譯失敗；可改用 crossover 引擎：steamplay setup --engine crossover"
-            info "若尚未安裝 Apple D3DMetal 函式庫，請至 developer.apple.com 下載"
-            info "Game Porting Toolkit dmg 後執行：steamplay gptk-libs <掛載的dmg路徑>"
+            ;;
+        crossover)
+            # wine-crossover cask 已從上游移除；僅支援沿用既有安裝
+            if find_wine >/dev/null 2>&1; then
+                info "沿用既有的 Wine Crossover 安裝"
+            else
+                die "wine-crossover 已無法從 Homebrew 安裝（上游已移除）。請改用預設引擎：steamplay setup"
+            fi
             ;;
         custom)
             [[ -n "$WINE_BIN" ]] || die "engine=custom 需要先設定：steamplay config set WINE_BIN /path/to/wine"
             ;;
-        *) die "未知引擎：${engine}（可用：crossover | gptk | custom）" ;;
+        *) die "未知引擎：${engine}（可用：auto | gptk | stable | crossover | custom）" ;;
     esac
 
     save_config_key ENGINE "$engine"
@@ -300,8 +340,9 @@ apply_mac_driver_tweaks() {
 
 cmd_gptk_libs() {
     require_macos
+    # 僅舊版（x86_64 formula）GPTK 需要；v3 cask 已內含 D3DMetal
     local src="${1:-}"
-    [[ -n "$src" ]] || die "用法：steamplay gptk-libs /Volumes/Game\\ Porting\\ Toolkit-*/"
+    [[ -n "$src" ]] || die "用法：steamplay gptk-libs /Volumes/Game\\ Porting\\ Toolkit-*/\n（注意：GPTK v3 cask 已內含 D3DMetal，通常不需要此步驟）"
     [[ -d "$src" ]] || die "找不到目錄：$src"
     local bp
     bp=$(arch -x86_64 /usr/local/bin/brew --prefix game-porting-toolkit 2>/dev/null) ||

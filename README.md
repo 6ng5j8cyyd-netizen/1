@@ -76,15 +76,17 @@ x86 指令由 **Rosetta 2** 轉譯到 Apple Silicon；macOS 15 起可透過 `ROS
 
 | 引擎 | 適合 | 說明 |
 |---|---|---|
-| `crossover`（預設） | 大多數遊戲 | Gcenx wine-crossover 建置，安裝快、相容性好、含 MSYNC |
-| `gptk` | DX12 大作 | Apple Game Porting Toolkit 的 D3DMetal，DX11/12 效能最佳 |
+| `auto`（預設） | — | Apple Silicon + macOS 14+ 自動選 `gptk`，其餘選 `stable` |
+| `gptk` | Apple Silicon | Game Porting Toolkit v3 cask，**內含 Apple D3DMetal**，DX11/12 效能最佳 |
+| `stable` | Intel Mac／備援 | WineHQ 官方 wine-stable cask |
+| `custom` | 進階使用者 | 自行指定 wine 執行檔（`config set WINE_BIN ...`） |
 
 ```bash
-steamplay setup --engine gptk        # 切換到 GPTK（需 Apple Silicon）
-steamplay gptk-libs "/Volumes/Game Porting Toolkit-2.1"   # 安裝 Apple D3DMetal 函式庫
+steamplay setup                      # auto：在 Mac mini M 系列上會直接裝 GPTK v3
+steamplay setup --engine stable      # 需要時手動改用 WineHQ stable
 ```
 
-（D3DMetal 函式庫因授權限制需自行到 [developer.apple.com](https://developer.apple.com/games/game-porting-toolkit/) 下載 GPTK dmg。）
+GPTK v3 以 cask 發佈、已內含 D3DMetal，不再需要手動下載 Apple 的 dmg 或安裝 x86_64 Homebrew；`gptk-libs` 指令僅為舊版安裝保留。
 
 ### 全域設定
 
@@ -128,7 +130,7 @@ steamplay kill                       # 遊戲卡死時強制關閉所有 Windows
 
 **遊戲啟動即閃退** — 先查 `steamplay logs`。看到 `avx` / `Illegal instruction` 表示需要 AVX：確認 macOS ≥ 15 且 `AVX=1`。看到缺 DLL 就用對應的 `steamplay tweak`。
 
-**FPS 偏低** — 依序嘗試：確認 `RETINA=0`；DX12 遊戲改用 `--engine gptk`；DX9–11 遊戲試 `steamplay tweak dxvk`；遊戲內解析度設為非 HiDPI 的 1920×1080；用 `HUD 1` 觀察瓶頸在 GPU 還是 CPU。
+**FPS 偏低** — 依序嘗試：確認 `RETINA=0`；確認用的是 GPTK 引擎（`steamplay doctor` 會顯示）；DX9–11 遊戲試 `steamplay tweak dxvk`；遊戲內解析度設為非 HiDPI 的 1920×1080；用 `HUD 1` 觀察瓶頸在 GPU 還是 CPU。
 
 **多人遊戲進不去** — 內含核心層反作弊（EAC/BattlEye）的遊戲在任何 Wine 類工具（含 CrossOver）上都無法上線，屬平台限制而非設定問題。
 
