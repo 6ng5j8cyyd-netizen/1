@@ -27,7 +27,16 @@ fi
 echo "steamplay 已安裝到 $BIN_DIR/steamplay"
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
-    *) echo "請將 $BIN_DIR 加入 PATH，例如：echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc" ;;
+    *)
+        # macOS 預設 shell 是 zsh，Terminal 開的是 login shell → 寫 ~/.zprofile
+        rc="$HOME/.zprofile"
+        marker="# steamplay PATH"
+        if ! grep -qs "$marker" "$rc"; then
+            printf '\n%s\nexport PATH="%s:$PATH"\n' "$marker" "$BIN_DIR" >> "$rc"
+        fi
+        echo "已將 $BIN_DIR 加入 PATH（寫入 ~/.zprofile）。"
+        echo "請開新的終端機視窗，或先執行：source ~/.zprofile"
+        ;;
 esac
 echo
 echo "下一步："
