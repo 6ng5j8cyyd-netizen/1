@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.3.1"
+VERSION="1.3.2"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -555,6 +555,11 @@ cmd_tweak() {
     wt=$(winetricks_bin) || die "找不到 winetricks，請先執行：steamplay setup"
     wine=$(find_wine) || die "找不到 Wine 引擎。請先執行：steamplay setup"
     wine_env
+    # winetricks 結尾會等 prefix 內所有 Windows 程式結束才收尾
+    if pgrep -qf wineserver 2>/dev/null; then
+        warn "偵測到 Steam 或遊戲仍在執行：修正的最後一步會等它們全部關閉。"
+        warn "若停在「wineserver -w」畫面，請開另一個終端機執行：steamplay kill"
+    fi
     msg "套用修正：$verb"
     WINE="$wine" "$wt" --unattended "$@"
     if [[ "$verb" == "cjkfonts" ]]; then
