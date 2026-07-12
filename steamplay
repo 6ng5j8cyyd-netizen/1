@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.4.0"
+VERSION="1.4.1"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -954,6 +954,31 @@ cmd_config() {
     esac
 }
 
+cmd_reset_ui() {
+    require_macos
+    # steamwebhelper（CEF）快取損壞會導致「Failed creating offscreen shared JS
+    # context」，介面畫不出來。清掉快取讓它重建是安全且常見的修法。
+    msg "清除 Steam 介面（steamwebhelper / CEF）快取"
+    cmd_kill >/dev/null 2>&1 || true
+
+    local base="$PREFIX/drive_c"
+    local u="$base/users/crossover"
+    [[ -d "$u" ]] || u="$base/users/$(whoami)"
+    local targets=(
+        "$base/Program Files (x86)/Steam/config/htmlcache"
+        "$u/AppData/Local/Steam/htmlcache"
+        "$u/AppData/Local/CEF"
+    )
+    local t removed=0
+    for t in "${targets[@]}"; do
+        if [[ -d "$t" ]]; then
+            rm -rf "$t" && { info "已清除：${t#$PREFIX/}"; removed=$((removed+1)); }
+        fi
+    done
+    [[ "$removed" -gt 0 ]] && ok "已清除 $removed 個快取目錄" || info "（找不到快取目錄，可能尚未產生）"
+    info "接著重新啟動：steamplay steam"
+}
+
 cmd_ps() {
     require_macos
     msg "Wine 環境中執行的程式（Dock 上的 wine64-preloader 即這些程序的宿主）"
@@ -1101,6 +1126,7 @@ ${c_bold}日常使用：${c_rst}
   steamplay launch <AppID>        直接啟動某款遊戲（AppID 見 steamdb.info）
   steamplay run <exe> [args]      執行任意 Windows 程式
   steamplay ps                    列出 Wine 環境中執行的程式
+  steamplay reset-ui              清除 Steam 介面快取（畫面空白/無法載入時）
   steamplay kill                  強制關閉所有 Windows 程式
 
 ${c_bold}效能與相容性：${c_rst}
@@ -1147,6 +1173,7 @@ main() {
         config)         cmd_config "$@" ;;
         prefix)         cmd_prefix "$@" ;;
         ps)             cmd_ps "$@" ;;
+        reset-ui)       cmd_reset_ui "$@" ;;
         kill)           cmd_kill "$@" ;;
         logs)           cmd_logs "$@" ;;
         doctor)         cmd_doctor "$@" ;;
