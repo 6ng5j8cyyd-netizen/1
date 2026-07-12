@@ -119,7 +119,7 @@ steamplay doctor                     # 先做系統診斷
 steamplay tweak dxvk                 # DX9–11 遊戲改走 Vulkan/MoltenVK，常可解決畫面問題
 steamplay tweak vcrun2022            # 缺 MSVCP/VCRUNTIME DLL
 steamplay tweak dotnet48             # 遊戲啟動器需要 .NET
-steamplay tweak cjkfonts             # 中文顯示成方塊
+steamplay tweak cjkfonts             # 中文顯示成方塊（中日韓系統在 install-steam 時會自動安裝）
 steamplay logs                       # 查看最新一次啟動的錯誤記錄
 steamplay kill                       # 遊戲卡死時強制關閉所有 Windows 程式
 ```

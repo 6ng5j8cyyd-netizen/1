@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.3.0"
+VERSION="1.3.1"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -360,11 +360,34 @@ steam_exe_path() {
     echo "$PREFIX/drive_c/Program Files (x86)/Steam/steam.exe"
 }
 
+install_cjk_fonts_if_needed() {
+    # 中日韓語系先裝字型，否則安裝器與 Steam 介面會顯示成方塊
+    local loc
+    loc=$(defaults read -g AppleLocale 2>/dev/null || echo "")
+    case "$loc" in
+        zh*|ja*|ko*) ;;
+        *) return 0 ;;
+    esac
+    [[ -f "$PREFIX/.steamplay-cjkfonts" ]] && return 0
+    local wt wine
+    wt=$(winetricks_bin) || return 0
+    wine=$(find_wine) || return 0
+    msg "安裝中日韓字型（避免介面亂碼，約需 1–3 分鐘）"
+    wine_env
+    if WINE="$wine" "$wt" --unattended cjkfonts >/dev/null 2>&1; then
+        touch "$PREFIX/.steamplay-cjkfonts"
+        ok "字型安裝完成"
+    else
+        warn "字型自動安裝失敗，可稍後手動執行：steamplay tweak cjkfonts"
+    fi
+}
+
 cmd_install_steam() {
     require_macos
     require_wine
     ensure_dirs
     init_prefix
+    install_cjk_fonts_if_needed
 
     if [[ -f "$(steam_exe_path)" ]]; then
         msg "Windows 版 Steam 已安裝於此 prefix。"
@@ -534,6 +557,9 @@ cmd_tweak() {
     wine_env
     msg "套用修正：$verb"
     WINE="$wine" "$wt" --unattended "$@"
+    if [[ "$verb" == "cjkfonts" ]]; then
+        touch "$PREFIX/.steamplay-cjkfonts" 2>/dev/null || true
+    fi
 }
 
 # ---------------------------------------------------------------------------
