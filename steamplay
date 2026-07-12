@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -262,7 +262,10 @@ cmd_setup() {
 
     init_prefix
 
+    cmd_shortcut --panel >/dev/null 2>&1 || true
+
     msg "環境安裝完成"
+    info "已建立「Steamplay 控制台」App（用 Spotlight 搜尋「Steamplay」即可開圖形介面）"
     info "下一步：steamplay install-steam"
 }
 
@@ -498,16 +501,21 @@ resolve_self() {
 
 cmd_shortcut() {
     require_macos
-    local appid="" name="" login=0 arg
+    local appid="" name="" login=0 panel=0 arg
     for arg in "$@"; do
         case "$arg" in
             --login) login=1 ;;
-            *) if [[ -z "$appid" ]]; then appid="$arg"; else name="$arg"; fi ;;
+            --panel) panel=1 ;;
+            *) if [[ -z "$appid" ]]; then appid="$arg"; else name="${name:+$name }$arg"; fi ;;
         esac
     done
 
     local label bundle_id target_cmd
-    if [[ -z "$appid" ]]; then
+    if [[ "$panel" == "1" ]]; then
+        label="Steamplay 控制台"
+        bundle_id="dev.steamplay.panel"
+        target_cmd="ui"
+    elif [[ -z "$appid" ]]; then
         label="Windows Steam"
         bundle_id="dev.steamplay.steam"
         target_cmd="steam"
@@ -519,12 +527,14 @@ cmd_shortcut() {
         target_cmd="launch $appid"
     fi
 
-    # 「/」「:」是 Finder 保留字元；引號會破壞產生的腳本，一併換掉
-    label=$(printf '%s' "$label" | tr '/:"' '---')
+    # 「/」「:」是 Finder 保留字元；引號與反斜線會破壞產生的腳本，一併換掉
+    label=$(printf '%s' "$label" | tr '/:"\\' '----')
     local label_xml
     label_xml=$(printf '%s' "$label" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
 
     local self; self=$(resolve_self)
+    # 寫進 stub 時以單引號包裹，路徑中的 $、反引號、雙引號才不會被二次展開
+    local self_sq; self_sq=$(printf '%s' "$self" | sed "s/'/'\\\\''/g")
     local app_dir="$HOME/Applications/$label.app"
     mkdir -p "$app_dir/Contents/MacOS"
 
@@ -546,17 +556,40 @@ cmd_shortcut() {
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$VERSION</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
 </dict>
 </plist>
 EOF
 
+    # Finder 啟動的程序 PATH 極簡且丟棄輸出，stub 需自備 PATH、
+    # 後備路徑解析，並在失敗時以原生對話框回報（不能無聲死掉）
     cat > "$app_dir/Contents/MacOS/launcher" <<EOF
 #!/bin/bash
-exec "$self" $target_cmd
+export PATH="/opt/homebrew/bin:/usr/local/bin:\$HOME/.local/bin:\$PATH"
+
+show_error() {
+    /usr/bin/osascript - "\$1" <<'OSA' >/dev/null 2>&1
+on run argv
+    display dialog (item 1 of argv) buttons {"好"} default button 1 with icon stop with title "steamplay"
+end run
+OSA
+}
+
+SP0='$self_sq'
+SP="\$SP0"
+if [[ ! -x "\$SP" ]]; then
+    SP="\$(command -v steamplay || true)"
+fi
+if [[ -z "\$SP" || ! -x "\$SP" ]]; then
+    show_error "找不到 steamplay 主程式（此捷徑建立時位於：\$SP0）。若已移動或重新安裝 steamplay，請在終端機重新執行一次 steamplay shortcut。"
+    exit 1
+fi
+
+out=\$("\$SP" $target_cmd 2>&1) || {
+    show_error "啟動失敗：\$(printf '%s' "\$out" | tail -c 900)"
+    exit 1
+}
 EOF
     chmod +x "$app_dir/Contents/MacOS/launcher"
 
@@ -564,15 +597,199 @@ EOF
         codesign --force -s - "$app_dir" >/dev/null 2>&1 || true
 
     ok "已建立捷徑：$app_dir"
-    info "從 Launchpad 或 Finder 的「應用程式」雙擊即可啟動，也可拖進 Dock。"
+    info "位置：~/Applications（注意：Finder 側邊欄的「應用程式」是 /Applications，是另一個資料夾）"
+    info "用 Spotlight（⌘空白鍵）搜尋「$label」即可開啟；執行 open ~/Applications 可把它拖進 Dock。"
 
     if [[ "$login" == "1" ]]; then
+        # 先刪同名項目再加入，重複執行不會堆疊出多個登入項目
+        osascript -e "tell application \"System Events\" to delete (every login item whose name is \"$label\")" >/dev/null 2>&1 || true
         if osascript -e "tell application \"System Events\" to make login item at end with properties {path:\"$app_dir\", hidden:false}" >/dev/null 2>&1; then
             ok "已加入登入項目：開機後自動啟動 $label"
+            info "之後不想自動啟動：到「系統設定 → 一般 → 登入項目」移除「$label」即可。"
         else
             warn "加入登入項目失敗，可到「系統設定 → 一般 → 登入項目」手動加入。"
         fi
     fi
+
+    if [[ "$target_cmd" == "steam" && ! -f "$(steam_exe_path)" ]]; then
+        info "提示：尚未安裝 Windows 版 Steam，此捷徑要等 steamplay install-steam 完成後才有作用。"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 圖形介面：以 macOS 原生對話框（osascript）實作的控制台，零額外依賴
+# ---------------------------------------------------------------------------
+
+ui_choose() {
+    # $1=提示文字，其餘=選項；回傳選到的項目，取消回傳空字串
+    local prompt="$1"; shift
+    /usr/bin/osascript -e 'on run argv
+set p to item 1 of argv
+set opts to rest of argv
+set choice to choose from list opts with title "Steamplay 控制台" with prompt p OK button name "選擇" cancel button name "關閉"
+if choice is false then return ""
+return item 1 of choice
+end run' "$prompt" "$@" 2>/dev/null || true
+}
+
+ui_prompt() {
+    /usr/bin/osascript -e 'on run argv
+try
+set r to display dialog (item 1 of argv) default answer (item 2 of argv) with title "Steamplay 控制台"
+return text returned of r
+on error
+return ""
+end try
+end run' "$1" "${2:-}" 2>/dev/null || true
+}
+
+ui_alert() {
+    /usr/bin/osascript -e 'on run argv
+display dialog (item 1 of argv) buttons {"好"} default button 1 with title "Steamplay 控制台"
+end run' "$1" >/dev/null 2>&1 || true
+}
+
+ui_notify() {
+    /usr/bin/osascript -e 'on run argv
+display notification (item 1 of argv) with title "Steamplay"
+end run' "$1" >/dev/null 2>&1 || true
+}
+
+ui_terminal() {
+    # 長時間工作（setup/install/tweak）開 Terminal 視窗跑，讓使用者看得到進度
+    /usr/bin/osascript -e 'on run argv
+tell application "Terminal"
+activate
+do script (item 1 of argv)
+end tell
+end run' "$1" >/dev/null 2>&1 || true
+}
+
+ui_menu_shortcut() {
+    local self="$1"
+    local sub
+    sub=$(ui_choose "要建立哪種捷徑？（會放到「使用者/應用程式」資料夾，可用 Spotlight 搜尋）" \
+        "Windows Steam" \
+        "Windows Steam（開機自動啟動）" \
+        "單一遊戲（輸入 AppID）" \
+        "Steamplay 控制台（本視窗）")
+    case "$sub" in
+        "Windows Steam")
+            "$self" shortcut >/dev/null 2>&1 || true
+            ui_alert "已建立「Windows Steam」捷徑到 ~/Applications。用 Spotlight（⌘空白鍵）搜尋「Windows Steam」即可開啟。" ;;
+        "Windows Steam（開機自動啟動）")
+            "$self" shortcut --login >/dev/null 2>&1 || true
+            ui_alert "已建立捷徑並加入登入項目，開機後會自動啟動 Windows Steam。" ;;
+        "單一遊戲（輸入 AppID）")
+            local appid gname
+            appid=$(ui_prompt "輸入遊戲的 Steam AppID（數字，可在 steamdb.info 查詢）：" "")
+            [[ -n "$appid" ]] || return 0
+            if [[ ! "$appid" =~ ^[0-9]+$ ]]; then ui_alert "AppID 必須是數字。"; return 0; fi
+            gname=$(ui_prompt "捷徑顯示名稱（例如遊戲名）：" "Steam 遊戲 $appid")
+            "$self" shortcut "$appid" "${gname:-Steam 遊戲 $appid}" >/dev/null 2>&1 || true
+            ui_alert "已建立「${gname:-Steam 遊戲 $appid}」捷徑，雙擊即可直接進遊戲。" ;;
+        "Steamplay 控制台（本視窗）")
+            "$self" shortcut --panel >/dev/null 2>&1 || true
+            ui_alert "已建立「Steamplay 控制台」捷徑，之後用 Spotlight 搜尋「Steamplay」即可打開本介面。" ;;
+    esac
+}
+
+ui_menu_tweak() {
+    local selfq="$1"
+    local sub
+    sub=$(ui_choose "選擇要套用的修正（會開啟終端機視窗顯示進度）：" \
+        "dxvk — 畫面異常或效能差（DX9–11 遊戲）" \
+        "vcrun2022 — 錯誤訊息缺 VCRUNTIME/MSVCP DLL" \
+        "dotnet48 — 遊戲啟動器需要 .NET" \
+        "corefonts — 介面字型亂碼" \
+        "cjkfonts — 中文顯示成方塊")
+    [[ -n "$sub" ]] || return 0
+    ui_terminal "$selfq tweak ${sub%% *}"
+}
+
+ui_menu_settings() {
+    local self="$1"
+    while :; do
+        load_config
+        local sub
+        sub=$(ui_choose "點選項目即可切換（立即生效）：" \
+            "效能 HUD（顯示 FPS）：$([[ "$HUD" == 1 ]] && echo 開 || echo 關)" \
+            "Retina 高解析度：$([[ "$RETINA" == 1 ]] && echo 開（畫質優先） || echo 關（效能優先）)" \
+            "同步機制：$SYNC（msync→esync→none 輪換）" \
+            "檢視完整設定")
+        case "$sub" in
+            "效能 HUD"*)      save_config_key HUD "$([[ "$HUD" == 1 ]] && echo 0 || echo 1)" ;;
+            "Retina 高解析度"*) save_config_key RETINA "$([[ "$RETINA" == 1 ]] && echo 0 || echo 1)" ;;
+            "同步機制"*)
+                case "$SYNC" in
+                    msync) save_config_key SYNC esync ;;
+                    esync) save_config_key SYNC none ;;
+                    *)     save_config_key SYNC msync ;;
+                esac ;;
+            "檢視完整設定")
+                ui_alert "$("$self" config show 2>&1 || true)" ;;
+            *) break ;;
+        esac
+    done
+}
+
+cmd_ui() {
+    require_macos
+    local self; self=$(resolve_self)
+    local selfq; selfq=$(printf '%q' "$self")
+
+    while :; do
+        local st_wine="未安裝" st_steam="未安裝"
+        if find_wine >/dev/null 2>&1; then st_wine="✔"; fi
+        if [[ -f "$(steam_exe_path)" ]]; then st_steam="✔"; fi
+
+        local choice
+        choice=$(ui_choose "狀態 — Wine 引擎：$st_wine　Windows Steam：$st_steam" \
+            "🎮 啟動 Windows Steam" \
+            "🚀 直接啟動遊戲（輸入 AppID）" \
+            "📦 步驟一：安裝環境（第一次使用）" \
+            "📦 步驟二：安裝 Windows 版 Steam" \
+            "🔗 建立雙擊捷徑" \
+            "🛠 修正工具（遊戲跑不起來時）" \
+            "⚙️ 效能設定" \
+            "🩺 系統診斷" \
+            "⛔ 強制關閉所有 Windows 程式")
+        [[ -n "$choice" ]] || break
+
+        case "$choice" in
+            "🎮 啟動 Windows Steam")
+                if [[ ! -f "$(steam_exe_path)" ]]; then
+                    ui_alert "尚未安裝 Windows 版 Steam。請先執行選單中的「步驟一：安裝環境」，完成後再執行「步驟二：安裝 Windows 版 Steam」。"
+                else
+                    "$self" steam >/dev/null 2>&1 || true
+                    ui_notify "Windows Steam 啟動中（第一次啟動會自我更新，請稍候 1–2 分鐘）"
+                fi ;;
+            "🚀 直接啟動遊戲（輸入 AppID）")
+                local appid
+                appid=$(ui_prompt "輸入遊戲的 Steam AppID（數字，可在 steamdb.info 查詢）：" "")
+                if [[ "$appid" =~ ^[0-9]+$ ]]; then
+                    "$self" launch "$appid" >/dev/null 2>&1 || true
+                    ui_notify "AppID $appid 啟動中"
+                elif [[ -n "$appid" ]]; then
+                    ui_alert "AppID 必須是數字。"
+                fi ;;
+            "📦 步驟一：安裝環境（第一次使用）")
+                ui_terminal "$selfq setup" ;;
+            "📦 步驟二：安裝 Windows 版 Steam")
+                ui_terminal "$selfq install-steam" ;;
+            "🔗 建立雙擊捷徑")
+                ui_menu_shortcut "$self" ;;
+            "🛠 修正工具（遊戲跑不起來時）")
+                ui_menu_tweak "$selfq" ;;
+            "⚙️ 效能設定")
+                ui_menu_settings "$self" ;;
+            "🩺 系統診斷")
+                ui_alert "$("$self" doctor 2>&1 || true)" ;;
+            "⛔ 強制關閉所有 Windows 程式")
+                "$self" kill >/dev/null 2>&1 || true
+                ui_notify "已關閉此環境中所有 Windows 程式" ;;
+        esac
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -725,8 +942,9 @@ ${c_bold}快速開始（三步驟）：${c_rst}
   steamplay steam            啟動 Windows 版 Steam，登入後即可下載遊戲
 
 ${c_bold}日常使用：${c_rst}
-  steamplay shortcut              建立「Windows Steam」App 捷徑（之後雙擊即開，免終端機）
-  steamplay shortcut <AppID> [名稱]  為單一遊戲建立 App 捷徑（--login 開機自動啟動）
+  steamplay ui                    圖形介面控制台（也可雙擊「Steamplay 控制台」App）
+  steamplay shortcut [--login]    建立「Windows Steam」App 捷徑（--login 開機自動啟動）
+  steamplay shortcut <AppID> [名稱]  為單一遊戲建立 App 捷徑（同樣支援 --login）
   steamplay steam                 啟動 Windows 版 Steam
   steamplay launch <AppID>        直接啟動某款遊戲（AppID 見 steamdb.info）
   steamplay run <exe> [args]      執行任意 Windows 程式
@@ -760,6 +978,7 @@ main() {
         launch)         cmd_launch "$@" ;;
         run)            cmd_run "$@" ;;
         shortcut)       cmd_shortcut "$@" ;;
+        ui)             cmd_ui "$@" ;;
         game)           cmd_game "$@" ;;
         tweak)          cmd_tweak "$@" ;;
         gptk-libs)      cmd_gptk_libs "$@" ;;

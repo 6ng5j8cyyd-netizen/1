@@ -22,6 +22,8 @@ git clone https://github.com/6ng5j8cyyd-netizen/1.git steamplay && cd steamplay
 ./install.sh
 ```
 
+📖 **不熟終端機？直接看[簡易使用說明](docs/使用說明.md)** ——安裝後有圖形介面控制台可用。
+
 ## 快速開始（三步驟）
 
 ```bash
@@ -29,6 +31,8 @@ steamplay setup            # 1. 安裝 Rosetta 2、Wine 引擎、winetricks，�
 steamplay install-steam    # 2. 下載並安裝 Windows 版 Steam 到相容層中
 steamplay steam            # 3. 啟動 Windows 版 Steam，登入帳號後即可下載 Windows 遊戲
 ```
+
+`setup` 完成時會自動建立「**Steamplay 控制台**」App（圖形介面）：用 Spotlight 搜尋「Steamplay」開啟後，安裝、啟動、修正、效能設定都可以用滑鼠點選完成，也可以隨時用 `steamplay ui` 從終端機叫出來。控制台以 macOS 原生對話框實作，零額外依賴。
 
 ## 日常使用：像一般 Mac App 一樣雙擊啟動（免終端機）
 
@@ -132,9 +136,9 @@ steamplay kill                       # 遊戲卡死時強制關閉所有 Windows
 
 ## 指令總覽
 
-執行 `steamplay help` 查看完整指令清單：`setup`、`install-steam`、`steam`、`shortcut`、`launch`、`run`、`game`、`tweak`、`gptk-libs`、`config`、`prefix`、`kill`、`logs`、`doctor`。
+執行 `steamplay help` 查看完整指令清單：`setup`、`install-steam`、`steam`、`ui`、`shortcut`、`launch`、`run`、`game`、`tweak`、`gptk-libs`、`config`、`prefix`、`kill`、`logs`、`doctor`。
 
-（捷徑不想要了？直接把 `~/Applications` 裡的 .app 拖到垃圾桶即可。）
+（捷徑不想要了？把 `~/Applications` 裡的 .app 拖到垃圾桶即可；若當初用過 `--login`，記得也到「系統設定 → 一般 → 登入項目」把對應項目移除。）
 
 ## 授權
 
