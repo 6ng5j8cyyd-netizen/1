@@ -1,0 +1,680 @@
+#!/usr/bin/env bash
+#
+# steamplay — 在 macOS 上執行 Windows 版 Steam 遊戲的相容層管理工具
+#
+# 類似 CrossOver / Whisky：以 Wine 為核心，整合 Apple Game Porting Toolkit
+# (D3DMetal)、DXVK/MoltenVK 與 MSYNC/ESYNC，提供 Steam 安裝、遊戲啟動、
+# 每遊戲效能調校與相容性修正。
+#
+# 用法：steamplay help
+#
+set -euo pipefail
+
+VERSION="1.0.0"
+
+STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
+CONFIG_FILE="$STEAMPLAY_HOME/config"
+GAMES_DIR="$STEAMPLAY_HOME/games.d"
+CACHE_DIR="$STEAMPLAY_HOME/cache"
+LOG_DIR="$STEAMPLAY_HOME/logs"
+DEFAULT_PREFIX="$STEAMPLAY_HOME/prefixes/default"
+
+STEAM_INSTALLER_URL="https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe"
+WINETRICKS_URL="https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks"
+
+# ---------------------------------------------------------------------------
+# 輸出
+# ---------------------------------------------------------------------------
+
+c_bold=$'\033[1m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_red=$'\033[31m'
+c_cyn=$'\033[36m'; c_rst=$'\033[0m'
+[[ -t 1 ]] || { c_bold=""; c_grn=""; c_ylw=""; c_red=""; c_cyn=""; c_rst=""; }
+
+msg()  { printf '%s==>%s %s\n' "$c_grn$c_bold" "$c_rst$c_bold" "$1$c_rst"; }
+info() { printf '    %s\n' "$1"; }
+warn() { printf '%s警告:%s %s\n' "$c_ylw$c_bold" "$c_rst" "$1" >&2; }
+die()  { printf '%s錯誤:%s %s\n' "$c_red$c_bold" "$c_rst" "$1" >&2; exit 1; }
+
+ok()   { printf '  %s✔%s %s\n' "$c_grn" "$c_rst" "$1"; }
+bad()  { printf '  %s✘%s %s\n' "$c_red" "$c_rst" "$1"; }
+
+# ---------------------------------------------------------------------------
+# 設定檔
+# ---------------------------------------------------------------------------
+
+# 全域預設值（可用 `steamplay config set KEY VALUE` 覆寫）
+ENGINE="crossover"        # crossover | gptk | custom
+WINE_BIN=""               # engine=custom 時的 wine 執行檔路徑
+SYNC="msync"              # msync | esync | none
+AVX="1"                   # Rosetta 2 公告 AVX 支援（macOS 15+，部分遊戲必需）
+HUD="0"                   # Metal 效能 HUD
+RETINA="0"                # Retina 原生解析度（HiDPI；關閉可提升效能）
+WINEDEBUG_SETTING="-all"  # 關閉 wine 除錯輸出以提升效能
+STEAM_FLAGS="-noreactlogin -nofriendsui"
+DXVK_ASYNC="1"            # 使用 DXVK 時啟用非同步 shader 編譯，減少卡頓
+
+load_config() {
+    # shellcheck disable=SC1090
+    [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+    PREFIX="${PREFIX:-$DEFAULT_PREFIX}"
+}
+
+save_config_key() {
+    local key="$1" value="$2"
+    mkdir -p "$STEAMPLAY_HOME"
+    touch "$CONFIG_FILE"
+    if grep -q "^${key}=" "$CONFIG_FILE"; then
+        sed -i '' "s|^${key}=.*|${key}=\"${value}\"|" "$CONFIG_FILE"
+    else
+        printf '%s="%s"\n' "$key" "$value" >> "$CONFIG_FILE"
+    fi
+}
+
+ensure_dirs() {
+    mkdir -p "$STEAMPLAY_HOME" "$GAMES_DIR" "$CACHE_DIR" "$LOG_DIR" \
+             "$(dirname "$DEFAULT_PREFIX")"
+}
+
+# ---------------------------------------------------------------------------
+# 系統偵測
+# ---------------------------------------------------------------------------
+
+require_macos() {
+    [[ "$(uname -s)" == "Darwin" ]] || die "steamplay 只能在 macOS 上執行。"
+}
+
+is_apple_silicon() {
+    [[ "$(uname -m)" == "arm64" ]] || sysctl -n hw.optional.arm64 2>/dev/null | grep -q 1
+}
+
+macos_major() { sw_vers -productVersion | cut -d. -f1; }
+
+has_rosetta() {
+    [[ -f /Library/Apple/usr/share/rosetta/rosetta ]] || arch -x86_64 /usr/bin/true 2>/dev/null
+}
+
+x86_brew() {
+    # Apple Silicon 上 GPTK 需要 x86_64 版 Homebrew（/usr/local）
+    if [[ -x /usr/local/bin/brew ]]; then
+        echo "arch -x86_64 /usr/local/bin/brew"
+    else
+        return 1
+    fi
+}
+
+native_brew() {
+    command -v brew >/dev/null 2>&1 && echo "brew" && return 0
+    [[ -x /opt/homebrew/bin/brew ]] && echo "/opt/homebrew/bin/brew" && return 0
+    [[ -x /usr/local/bin/brew ]] && echo "/usr/local/bin/brew" && return 0
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Wine 引擎
+# ---------------------------------------------------------------------------
+
+find_wine() {
+    # 回傳 wine 執行檔路徑；依 ENGINE 設定尋找
+    case "$ENGINE" in
+        custom)
+            [[ -x "$WINE_BIN" ]] && { echo "$WINE_BIN"; return 0; }
+            ;;
+        gptk)
+            local bp
+            if bp=$(arch -x86_64 /usr/local/bin/brew --prefix game-porting-toolkit 2>/dev/null); then
+                [[ -x "$bp/bin/wine64" ]] && { echo "$bp/bin/wine64"; return 0; }
+            fi
+            ;;
+        crossover|*)
+            local p
+            for p in \
+                "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine64" \
+                "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine" \
+                "/Applications/Wine Staging.app/Contents/Resources/wine/bin/wine64" \
+                "/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine64"
+            do
+                [[ -x "$p" ]] && { echo "$p"; return 0; }
+            done
+            command -v wine64 2>/dev/null && return 0
+            command -v wine 2>/dev/null && return 0
+            ;;
+    esac
+    return 1
+}
+
+wine_or_die() {
+    find_wine || die "找不到 Wine。請先執行：steamplay setup"
+}
+
+wineserver_bin() {
+    local wine; wine=$(wine_or_die)
+    local ws="$(dirname "$wine")/wineserver"
+    [[ -x "$ws" ]] && echo "$ws" || echo ""
+}
+
+# 組合執行環境；所有 wine 呼叫前都要先呼叫這個
+wine_env() {
+    export WINEPREFIX="$PREFIX"
+    export WINEDEBUG="$WINEDEBUG_SETTING"
+
+    case "$SYNC" in
+        msync) export WINEMSYNC=1 WINEESYNC=1 ;;   # 舊版 wine 無 msync 時退回 esync
+        esync) export WINEESYNC=1 ;;
+    esac
+
+    # macOS 15+ 的 Rosetta 2 可對 x86 程式公告 AVX/AVX2，部分新遊戲必需
+    if [[ "$AVX" == "1" ]] && is_apple_silicon && [[ "$(macos_major)" -ge 15 ]]; then
+        export ROSETTA_ADVERTISE_AVX=1
+    fi
+
+    [[ "$HUD" == "1" ]] && export MTL_HUD_ENABLED=1
+    [[ "$DXVK_ASYNC" == "1" ]] && export DXVK_ASYNC=1
+
+    export D3DM_SUPPORT_DXR=0
+    return 0
+}
+
+run_wine() {
+    local wine; wine=$(wine_or_die)
+    wine_env
+    if is_apple_silicon && [[ "$ENGINE" == "gptk" ]]; then
+        arch -x86_64 "$wine" "$@"
+    else
+        "$wine" "$@"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# setup：安裝相依套件
+# ---------------------------------------------------------------------------
+
+cmd_setup() {
+    require_macos
+    ensure_dirs
+
+    local engine="$ENGINE"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --engine) engine="$2"; shift 2 ;;
+            *) die "setup：未知參數 $1" ;;
+        esac
+    done
+
+    msg "steamplay 環境安裝（引擎：$engine）"
+
+    if is_apple_silicon; then
+        info "偵測到 Apple Silicon（Mac mini M 系列）"
+        if ! has_rosetta; then
+            msg "安裝 Rosetta 2（執行 x86 Windows 程式所需）"
+            softwareupdate --install-rosetta --agree-to-license
+        fi
+        ok "Rosetta 2 已就緒"
+    else
+        info "偵測到 Intel Mac"
+    fi
+
+    local brew
+    brew=$(native_brew) || die "找不到 Homebrew。請先安裝：https://brew.sh"
+    ok "Homebrew：$($brew --prefix)"
+
+    case "$engine" in
+        crossover)
+            msg "安裝 Wine（Gcenx wine-crossover 建置，含 MSYNC 與 CrossOver 修補）"
+            $brew tap gcenx/wine >/dev/null
+            if ! find_wine >/dev/null 2>&1; then
+                $brew install --cask --no-quarantine gcenx/wine/wine-crossover
+            fi
+            ;;
+        gptk)
+            is_apple_silicon || die "Game Porting Toolkit 僅支援 Apple Silicon。"
+            msg "安裝 Apple Game Porting Toolkit（D3DMetal，DX11/DX12 效能最佳）"
+            if [[ ! -x /usr/local/bin/brew ]]; then
+                info "安裝 x86_64 版 Homebrew 到 /usr/local ..."
+                arch -x86_64 /bin/bash -c \
+                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            fi
+            arch -x86_64 /usr/local/bin/brew tap gcenx/wine >/dev/null
+            arch -x86_64 /usr/local/bin/brew install gcenx/wine/game-porting-toolkit ||
+                warn "GPTK 編譯失敗；可改用 crossover 引擎：steamplay setup --engine crossover"
+            info "若尚未安裝 Apple D3DMetal 函式庫，請至 developer.apple.com 下載"
+            info "Game Porting Toolkit dmg 後執行：steamplay gptk-libs <掛載的dmg路徑>"
+            ;;
+        custom)
+            [[ -n "$WINE_BIN" ]] || die "engine=custom 需要先設定：steamplay config set WINE_BIN /path/to/wine"
+            ;;
+        *) die "未知引擎：$engine（可用：crossover | gptk | custom）" ;;
+    esac
+
+    save_config_key ENGINE "$engine"
+    ENGINE="$engine"
+
+    local wine
+    wine=$(find_wine) || die "Wine 安裝後仍找不到執行檔，請執行 steamplay doctor 檢查。"
+    ok "Wine：$wine"
+
+    if ! command -v winetricks >/dev/null 2>&1 && [[ ! -x "$CACHE_DIR/winetricks" ]]; then
+        msg "安裝 winetricks（相容性修正工具）"
+        $brew install winetricks 2>/dev/null || {
+            curl -fsSL "$WINETRICKS_URL" -o "$CACHE_DIR/winetricks"
+            chmod +x "$CACHE_DIR/winetricks"
+        }
+    fi
+
+    init_prefix
+
+    msg "環境安裝完成"
+    info "下一步：steamplay install-steam"
+}
+
+init_prefix() {
+    if [[ ! -f "$PREFIX/system.reg" ]]; then
+        msg "初始化 Wine prefix：$PREFIX"
+        mkdir -p "$PREFIX"
+        run_wine wineboot --init >/dev/null 2>&1 || true
+        local ws; ws=$(wineserver_bin)
+        [[ -n "$ws" ]] && WINEPREFIX="$PREFIX" "$ws" -w 2>/dev/null || true
+    fi
+
+    # Windows 10 相容模式 + macOS 圖形驅動調校
+    run_wine winecfg -v win10 >/dev/null 2>&1 || true
+    apply_mac_driver_tweaks
+}
+
+apply_mac_driver_tweaks() {
+    local retina_val="n"
+    [[ "$RETINA" == "1" ]] && retina_val="y"
+    run_wine reg add 'HKCU\Software\Wine\Mac Driver' /v RetinaMode /t REG_SZ /d "$retina_val" /f >/dev/null 2>&1 || true
+    # 停用視窗裝飾動畫、允許立即全螢幕切換，減少輸入延遲
+    run_wine reg add 'HKCU\Software\Wine\Mac Driver' /v ForceOpenGLBackingStore /t REG_SZ /d "n" /f >/dev/null 2>&1 || true
+    run_wine reg add 'HKCU\Software\Wine\Mac Driver' /v CaptureDisplaysForFullscreen /t REG_SZ /d "y" /f >/dev/null 2>&1 || true
+}
+
+cmd_gptk_libs() {
+    require_macos
+    local src="${1:-}"
+    [[ -n "$src" ]] || die "用法：steamplay gptk-libs /Volumes/Game\\ Porting\\ Toolkit-*/"
+    [[ -d "$src" ]] || die "找不到目錄：$src"
+    local bp
+    bp=$(arch -x86_64 /usr/local/bin/brew --prefix game-porting-toolkit 2>/dev/null) ||
+        die "尚未安裝 game-porting-toolkit，請先執行：steamplay setup --engine gptk"
+    msg "複製 D3DMetal 函式庫到 $bp/lib/"
+    ditto "$src/redist/lib/" "$bp/lib/" 2>/dev/null || ditto "$src/lib/" "$bp/lib/"
+    ok "D3DMetal 已安裝（DirectX 11/12 → Metal 轉譯已啟用）"
+}
+
+# ---------------------------------------------------------------------------
+# Steam 安裝與啟動
+# ---------------------------------------------------------------------------
+
+steam_exe_path() {
+    echo "$PREFIX/drive_c/Program Files (x86)/Steam/steam.exe"
+}
+
+cmd_install_steam() {
+    require_macos
+    ensure_dirs
+    init_prefix
+
+    if [[ -f "$(steam_exe_path)" ]]; then
+        msg "Windows 版 Steam 已安裝於此 prefix。"
+        info "直接啟動：steamplay steam"
+        return 0
+    fi
+
+    local installer="$CACHE_DIR/SteamSetup.exe"
+    if [[ ! -f "$installer" ]]; then
+        msg "下載 Windows 版 Steam 安裝程式"
+        curl -fL --retry 3 -o "$installer" "$STEAM_INSTALLER_URL"
+    fi
+
+    msg "在 Wine prefix 中安裝 Steam（請依安裝精靈完成安裝）"
+    run_wine "$installer" /S || run_wine "$installer" || true
+    local ws; ws=$(wineserver_bin)
+    [[ -n "$ws" ]] && WINEPREFIX="$PREFIX" "$ws" -w 2>/dev/null || true
+
+    if [[ -f "$(steam_exe_path)" ]]; then
+        ok "Steam 安裝完成"
+        info "啟動：steamplay steam（第一次啟動會自我更新，需等待數分鐘）"
+    else
+        die "Steam 安裝似乎未完成，請重新執行 steamplay install-steam"
+    fi
+}
+
+cmd_steam() {
+    require_macos
+    local exe; exe=$(steam_exe_path)
+    [[ -f "$exe" ]] || die "尚未安裝 Windows 版 Steam，請先執行：steamplay install-steam"
+
+    msg "啟動 Windows 版 Steam（引擎：$ENGINE，同步：$SYNC）"
+    local log="$LOG_DIR/steam-$(date +%Y%m%d-%H%M%S).log"
+    info "記錄檔：$log"
+    # shellcheck disable=SC2086
+    run_wine "$exe" $STEAM_FLAGS "$@" >"$log" 2>&1 &
+    info "Steam 已在背景啟動；關閉：steamplay kill"
+}
+
+cmd_launch() {
+    require_macos
+    local appid="${1:-}"
+    [[ -n "$appid" ]] || die "用法：steamplay launch <Steam AppID>\n（AppID 可在 steamdb.info 查詢）"
+    shift
+
+    local exe; exe=$(steam_exe_path)
+    [[ -f "$exe" ]] || die "尚未安裝 Windows 版 Steam，請先執行：steamplay install-steam"
+
+    load_game_env "$appid"
+
+    msg "透過 Steam 啟動 AppID $appid"
+    local log="$LOG_DIR/game-$appid-$(date +%Y%m%d-%H%M%S).log"
+    info "記錄檔：$log"
+    # shellcheck disable=SC2086
+    run_wine "$exe" $STEAM_FLAGS -applaunch "$appid" "$@" >"$log" 2>&1 &
+    info "遊戲啟動中；效能 HUD 可用 steamplay config set HUD 1 開啟"
+}
+
+cmd_run() {
+    require_macos
+    local exe="${1:-}"
+    [[ -n "$exe" ]] || die "用法：steamplay run <exe路徑> [參數...]"
+    shift
+    msg "執行：$exe"
+    run_wine "$exe" "$@"
+}
+
+# ---------------------------------------------------------------------------
+# 每遊戲設定與內建相容性資料庫
+# ---------------------------------------------------------------------------
+
+load_game_env() {
+    local appid="$1"
+    builtin_game_tweaks "$appid"
+    local f="$GAMES_DIR/$appid.env"
+    if [[ -f "$f" ]]; then
+        info "套用遊戲設定：$f"
+        set -a
+        # shellcheck disable=SC1090
+        source "$f"
+        set +a
+    fi
+}
+
+# 內建相容性資料庫：社群驗證過的每遊戲調校（使用者設定檔可覆寫）
+builtin_game_tweaks() {
+    case "$1" in
+        1091500)  # Cyberpunk 2077：需要 AVX，DX12 建議 GPTK/D3DMetal
+            export ROSETTA_ADVERTISE_AVX=1
+            ;;
+        271590)   # GTA V：esync 較穩定
+            export WINEESYNC=1; unset WINEMSYNC 2>/dev/null || true
+            ;;
+        1245620)  # Elden Ring：關閉 EAC 需以離線模式；提示使用者
+            warn "Elden Ring 的 Easy Anti-Cheat 在 Wine 上不支援，請以離線模式遊玩。"
+            ;;
+        578080)   # PUBG：BattlEye 反作弊不支援
+            warn "PUBG 使用 BattlEye 反作弊，目前無法在 Wine/CrossOver 上執行。"
+            ;;
+    esac
+}
+
+cmd_game() {
+    local sub="${1:-list}"; shift || true
+    case "$sub" in
+        list)
+            msg "每遊戲設定檔（$GAMES_DIR）"
+            if ls "$GAMES_DIR"/*.env >/dev/null 2>&1; then
+                for f in "$GAMES_DIR"/*.env; do
+                    info "AppID $(basename "$f" .env)"
+                done
+            else
+                info "（尚無設定檔）建立範例：steamplay game edit <AppID>"
+            fi
+            ;;
+        edit)
+            local appid="${1:-}"
+            [[ -n "$appid" ]] || die "用法：steamplay game edit <AppID>"
+            local f="$GAMES_DIR/$appid.env"
+            if [[ ! -f "$f" ]]; then
+                mkdir -p "$GAMES_DIR"
+                cat > "$f" <<'EOF'
+# 此檔案中的環境變數會在啟動這款遊戲前載入（覆寫全域設定）。
+# 常用選項：
+# WINEESYNC=1              # 改用 esync（部分遊戲比 msync 穩定）
+# ROSETTA_ADVERTISE_AVX=1  # 遊戲需要 AVX 指令集時開啟（macOS 15+）
+# MTL_HUD_ENABLED=1        # 顯示 Metal 效能 HUD（FPS/GPU 使用率）
+# DXVK_ASYNC=1             # DXVK 非同步 shader 編譯，減少卡頓
+# WINEDLLOVERRIDES="dinput8=n,b"   # 遊戲模組/修正 DLL 覆寫
+EOF
+            fi
+            "${EDITOR:-nano}" "$f"
+            ;;
+        *) die "用法：steamplay game [list|edit <AppID>]" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# 相容性修正（winetricks）
+# ---------------------------------------------------------------------------
+
+winetricks_bin() {
+    command -v winetricks 2>/dev/null && return 0
+    [[ -x "$CACHE_DIR/winetricks" ]] && { echo "$CACHE_DIR/winetricks"; return 0; }
+    return 1
+}
+
+cmd_tweak() {
+    require_macos
+    local verb="${1:-}"
+    [[ -n "$verb" ]] || {
+        msg "常用相容性修正"
+        info "steamplay tweak dxvk         # DX9-11 → Vulkan(MoltenVK)，部分遊戲效能更佳"
+        info "steamplay tweak vcrun2022    # Visual C++ 執行階段（遊戲缺 DLL 時）"
+        info "steamplay tweak dotnet48     # .NET Framework 4.8"
+        info "steamplay tweak corefonts    # Windows 字型（介面亂碼時）"
+        info "steamplay tweak cjkfonts     # 中日韓字型（中文遊戲顯示方塊時）"
+        info "steamplay tweak <任意 winetricks verb>"
+        return 0
+    }
+    local wt wine
+    wt=$(winetricks_bin) || die "找不到 winetricks，請先執行：steamplay setup"
+    wine=$(wine_or_die)
+    wine_env
+    msg "套用修正：$verb"
+    WINE="$wine" "$wt" --unattended "$@"
+}
+
+# ---------------------------------------------------------------------------
+# 管理指令
+# ---------------------------------------------------------------------------
+
+cmd_config() {
+    local sub="${1:-show}"; shift || true
+    case "$sub" in
+        show)
+            msg "目前設定（$CONFIG_FILE）"
+            info "ENGINE=$ENGINE          # wine 引擎：crossover | gptk | custom"
+            info "SYNC=$SYNC              # 同步機制：msync | esync | none"
+            info "AVX=$AVX                # Rosetta AVX 公告（macOS 15+）"
+            info "HUD=$HUD                # Metal 效能 HUD"
+            info "RETINA=$RETINA          # Retina 原生解析度（0=效能優先）"
+            info "DXVK_ASYNC=$DXVK_ASYNC  # DXVK 非同步 shader 編譯"
+            info "PREFIX=$PREFIX"
+            info "STEAM_FLAGS=$STEAM_FLAGS"
+            ;;
+        set)
+            local key="${1:-}" value="${2:-}"
+            [[ -n "$key" && -n "$value" ]] || die "用法：steamplay config set KEY VALUE"
+            save_config_key "$key" "$value"
+            ok "已設定 $key=$value"
+            [[ "$key" == "RETINA" ]] && { load_config; apply_mac_driver_tweaks; }
+            ;;
+        *) die "用法：steamplay config [show|set KEY VALUE]" ;;
+    esac
+}
+
+cmd_kill() {
+    require_macos
+    local ws; ws=$(wineserver_bin)
+    if [[ -n "$ws" ]]; then
+        WINEPREFIX="$PREFIX" "$ws" -k 2>/dev/null || true
+        ok "已關閉此 prefix 內所有 Windows 程式"
+    else
+        warn "找不到 wineserver"
+    fi
+}
+
+cmd_prefix() {
+    local sub="${1:-info}"; shift || true
+    case "$sub" in
+        info)
+            msg "Wine prefix：$PREFIX"
+            [[ -f "$PREFIX/system.reg" ]] && ok "已初始化" || bad "尚未初始化"
+            [[ -f "$(steam_exe_path)" ]] && ok "Steam 已安裝" || bad "Steam 未安裝"
+            [[ -d "$PREFIX" ]] && info "大小：$(du -sh "$PREFIX" 2>/dev/null | cut -f1)"
+            ;;
+        reset)
+            warn "即將刪除 prefix（含所有已安裝遊戲存檔以外的資料）：$PREFIX"
+            printf '輸入 yes 確認：'
+            read -r ans
+            [[ "$ans" == "yes" ]] || die "已取消"
+            cmd_kill || true
+            rm -rf "$PREFIX"
+            ok "prefix 已刪除，下次執行時會重新初始化"
+            ;;
+        backup)
+            local dest="${1:-$STEAMPLAY_HOME/prefix-backup-$(date +%Y%m%d).tar.gz}"
+            msg "備份 prefix 到 $dest"
+            tar -czf "$dest" -C "$(dirname "$PREFIX")" "$(basename "$PREFIX")"
+            ok "備份完成"
+            ;;
+        *) die "用法：steamplay prefix [info|reset|backup [路徑]]" ;;
+    esac
+}
+
+cmd_logs() {
+    local latest
+    latest=$(ls -t "$LOG_DIR"/*.log 2>/dev/null | head -1) || true
+    [[ -n "${latest:-}" ]] || die "尚無記錄檔"
+    msg "最新記錄：$latest"
+    tail -n 100 "$latest"
+}
+
+# ---------------------------------------------------------------------------
+# doctor：診斷
+# ---------------------------------------------------------------------------
+
+cmd_doctor() {
+    require_macos
+    msg "steamplay 系統診斷"
+
+    local mv; mv=$(sw_vers -productVersion)
+    if [[ "$(macos_major)" -ge 14 ]]; then
+        ok "macOS $mv"
+    else
+        bad "macOS $mv（建議 14 Sonoma 以上；GPTK 需要 14+）"
+    fi
+
+    if is_apple_silicon; then
+        ok "Apple Silicon（$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo arm64)）"
+        has_rosetta && ok "Rosetta 2 已安裝" || bad "缺少 Rosetta 2 → steamplay setup"
+        if [[ "$(macos_major)" -ge 15 ]]; then
+            ok "Rosetta AVX 可用（macOS 15+）"
+        else
+            warn "macOS 15 以上才支援 Rosetta AVX；需要 AVX 的新遊戲將無法執行"
+        fi
+    else
+        ok "Intel Mac"
+    fi
+
+    native_brew >/dev/null && ok "Homebrew（原生）" || bad "缺少 Homebrew → https://brew.sh"
+    if is_apple_silicon; then
+        [[ -x /usr/local/bin/brew ]] && ok "Homebrew（x86_64，GPTK 用）" \
+            || info "  （選用）GPTK 引擎需要 x86_64 Homebrew"
+    fi
+
+    local wine
+    if wine=$(find_wine); then
+        ok "Wine（$ENGINE）：$wine"
+    else
+        bad "找不到 Wine → steamplay setup"
+    fi
+
+    winetricks_bin >/dev/null && ok "winetricks" || info "  （選用）winetricks 未安裝"
+
+    [[ -f "$PREFIX/system.reg" ]] && ok "Prefix 已初始化：$PREFIX" || bad "Prefix 未初始化 → steamplay setup"
+    [[ -f "$(steam_exe_path)" ]] && ok "Windows 版 Steam 已安裝" || bad "Windows 版 Steam 未安裝 → steamplay install-steam"
+
+    local free
+    free=$(df -g "$HOME" 2>/dev/null | awk 'NR==2{print $4}')
+    if [[ -n "${free:-}" ]]; then
+        if [[ "$free" -ge 50 ]]; then ok "可用磁碟空間：${free} GB"
+        else warn "可用磁碟空間僅 ${free} GB，大型遊戲可能不足"; fi
+    fi
+
+    if [[ -d "$HOME/Library/Application Support/Steam" ]] || [[ -d "/Applications/Steam.app" ]]; then
+        info ""
+        info "提示：偵測到 macOS 原生版 Steam。它與本工具安裝的 Windows 版 Steam 是"
+        info "各自獨立的：Windows 專屬遊戲必須透過 Windows 版 Steam（steamplay steam）"
+        info "下載與執行；兩者可同時安裝、共用同一個 Steam 帳號。"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# help / main
+# ---------------------------------------------------------------------------
+
+usage() {
+    cat <<EOF
+${c_bold}steamplay v$VERSION${c_rst} — 在 macOS 上玩 Steam 的 Windows 版遊戲（類 CrossOver 工具）
+
+${c_bold}快速開始（三步驟）：${c_rst}
+  steamplay setup            安裝 Wine 引擎與相依套件
+  steamplay install-steam    在 Wine 環境中安裝 Windows 版 Steam
+  steamplay steam            啟動 Windows 版 Steam，登入後即可下載遊戲
+
+${c_bold}日常使用：${c_rst}
+  steamplay steam                 啟動 Windows 版 Steam
+  steamplay launch <AppID>        直接啟動某款遊戲（AppID 見 steamdb.info）
+  steamplay run <exe> [args]      執行任意 Windows 程式
+  steamplay kill                  強制關閉所有 Windows 程式
+
+${c_bold}效能與相容性：${c_rst}
+  steamplay config show           檢視全域設定（同步機制/AVX/HUD/Retina）
+  steamplay config set KEY VALUE  修改設定（如 HUD 1 顯示 FPS）
+  steamplay game edit <AppID>     編輯單一遊戲的專屬調校
+  steamplay tweak [verb]          套用相容性修正（dxvk/vcrun2022/cjkfonts...）
+  steamplay setup --engine gptk   改用 Apple Game Porting Toolkit（DX12 效能最佳）
+  steamplay gptk-libs <dmg路徑>   安裝 Apple D3DMetal 函式庫
+
+${c_bold}管理：${c_rst}
+  steamplay doctor                系統診斷
+  steamplay prefix [info|reset|backup]
+  steamplay logs                  查看最新執行記錄
+  steamplay version | help
+EOF
+}
+
+main() {
+    ensure_dirs 2>/dev/null || true
+    load_config
+
+    local cmd="${1:-help}"; shift || true
+    case "$cmd" in
+        setup)          cmd_setup "$@" ;;
+        install-steam)  cmd_install_steam "$@" ;;
+        steam)          cmd_steam "$@" ;;
+        launch)         cmd_launch "$@" ;;
+        run)            cmd_run "$@" ;;
+        game)           cmd_game "$@" ;;
+        tweak)          cmd_tweak "$@" ;;
+        gptk-libs)      cmd_gptk_libs "$@" ;;
+        config)         cmd_config "$@" ;;
+        prefix)         cmd_prefix "$@" ;;
+        kill)           cmd_kill "$@" ;;
+        logs)           cmd_logs "$@" ;;
+        doctor)         cmd_doctor "$@" ;;
+        version|-v|--version) echo "steamplay v$VERSION" ;;
+        help|-h|--help|*) usage ;;
+    esac
+}
+
+main "$@"
