@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.2.1"
+VERSION="1.2.2"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -205,7 +205,7 @@ cmd_setup() {
         esac
     done
 
-    msg "steamplay 環境安裝（引擎：$engine）"
+    msg "steamplay 環境安裝（引擎：${engine}）"
 
     if is_apple_silicon; then
         info "偵測到 Apple Silicon（Mac mini M 系列）"
@@ -247,7 +247,7 @@ cmd_setup() {
         custom)
             [[ -n "$WINE_BIN" ]] || die "engine=custom 需要先設定：steamplay config set WINE_BIN /path/to/wine"
             ;;
-        *) die "未知引擎：$engine（可用：crossover | gptk | custom）" ;;
+        *) die "未知引擎：${engine}（可用：crossover | gptk | custom）" ;;
     esac
 
     save_config_key ENGINE "$engine"
@@ -356,7 +356,7 @@ cmd_steam() {
     local exe; exe=$(steam_exe_path)
     [[ -f "$exe" ]] || die "尚未安裝 Windows 版 Steam，請先執行：steamplay install-steam"
 
-    msg "啟動 Windows 版 Steam（引擎：$ENGINE，同步：$SYNC）"
+    msg "啟動 Windows 版 Steam（引擎：${ENGINE}，同步：${SYNC}）"
     local log="$LOG_DIR/steam-$(date +%Y%m%d-%H%M%S).log"
     info "記錄檔：$log"
     # shellcheck disable=SC2086
@@ -433,7 +433,7 @@ cmd_game() {
     local sub="${1:-list}"; shift || true
     case "$sub" in
         list)
-            msg "每遊戲設定檔（$GAMES_DIR）"
+            msg "每遊戲設定檔（${GAMES_DIR}）"
             if ls "$GAMES_DIR"/*.env >/dev/null 2>&1; then
                 for f in "$GAMES_DIR"/*.env; do
                     info "AppID $(basename "$f" .env)"
@@ -592,7 +592,7 @@ if [[ ! -x "\$SP" ]]; then
     SP="\$(command -v steamplay || true)"
 fi
 if [[ -z "\$SP" || ! -x "\$SP" ]]; then
-    show_error "找不到 steamplay 主程式（此捷徑建立時位於：\$SP0）。若已移動或重新安裝 steamplay，請在終端機重新執行一次 steamplay shortcut。"
+    show_error "找不到 steamplay 主程式（此捷徑建立時位於：\${SP0}）。若已移動或重新安裝 steamplay，請在終端機重新執行一次 steamplay shortcut。"
     exit 1
 fi
 
@@ -609,14 +609,14 @@ EOF
 
     ok "已建立捷徑：$app_dir"
     info "位置：~/Applications（注意：Finder 側邊欄的「應用程式」是 /Applications，是另一個資料夾）"
-    info "用 Spotlight（⌘空白鍵）搜尋「$label」即可開啟；執行 open ~/Applications 可把它拖進 Dock。"
+    info "用 Spotlight（⌘空白鍵）搜尋「${label}」即可開啟；執行 open ~/Applications 可把它拖進 Dock。"
 
     if [[ "$login" == "1" ]]; then
         # 先刪同名項目再加入，重複執行不會堆疊出多個登入項目
         osascript -e "tell application \"System Events\" to delete (every login item whose name is \"$label\")" >/dev/null 2>&1 || true
         if osascript -e "tell application \"System Events\" to make login item at end with properties {path:\"$app_dir\", hidden:false}" >/dev/null 2>&1; then
             ok "已加入登入項目：開機後自動啟動 $label"
-            info "之後不想自動啟動：到「系統設定 → 一般 → 登入項目」移除「$label」即可。"
+            info "之後不想自動啟動：到「系統設定 → 一般 → 登入項目」移除「${label}」即可。"
         else
             warn "加入登入項目失敗，可到「系統設定 → 一般 → 登入項目」手動加入。"
         fi
@@ -726,7 +726,7 @@ ui_menu_settings() {
         sub=$(ui_choose "點選項目即可切換（立即生效）：" \
             "效能 HUD（顯示 FPS）：$([[ "$HUD" == 1 ]] && echo 開 || echo 關)" \
             "Retina 高解析度：$([[ "$RETINA" == 1 ]] && echo 開（畫質優先） || echo 關（效能優先）)" \
-            "同步機制：$SYNC（msync→esync→none 輪換）" \
+            "同步機制：${SYNC}（msync→esync→none 輪換）" \
             "檢視完整設定")
         case "$sub" in
             "效能 HUD"*)      save_config_key HUD "$([[ "$HUD" == 1 ]] && echo 0 || echo 1)" ;;
@@ -755,7 +755,7 @@ cmd_ui() {
         if [[ -f "$(steam_exe_path)" ]]; then st_steam="✔"; fi
 
         local choice
-        choice=$(ui_choose "狀態 — Wine 引擎：$st_wine　Windows Steam：$st_steam" \
+        choice=$(ui_choose "狀態 — Wine 引擎：${st_wine}　Windows Steam：$st_steam" \
             "🎮 啟動 Windows Steam" \
             "🚀 直接啟動遊戲（輸入 AppID）" \
             "📦 步驟一：安裝環境（第一次使用）" \
@@ -819,7 +819,7 @@ cmd_config() {
     local sub="${1:-show}"; shift || true
     case "$sub" in
         show)
-            msg "目前設定（$CONFIG_FILE）"
+            msg "目前設定（${CONFIG_FILE}）"
             info "ENGINE=$ENGINE          # wine 引擎：crossover | gptk | custom"
             info "SYNC=$SYNC              # 同步機制：msync | esync | none"
             info "AVX=$AVX                # Rosetta AVX 公告（macOS 15+）"
@@ -899,7 +899,7 @@ cmd_doctor() {
     if [[ "$(macos_major)" -ge 14 ]]; then
         ok "macOS $mv"
     else
-        bad "macOS $mv（建議 14 Sonoma 以上；GPTK 需要 14+）"
+        bad "macOS ${mv}（建議 14 Sonoma 以上；GPTK 需要 14+）"
     fi
 
     if is_apple_silicon; then
@@ -922,7 +922,7 @@ cmd_doctor() {
 
     local wine
     if wine=$(find_wine); then
-        ok "Wine（$ENGINE）：$wine"
+        ok "Wine（${ENGINE}）：$wine"
     else
         bad "找不到 Wine → steamplay setup"
     fi
