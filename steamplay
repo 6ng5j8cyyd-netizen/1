@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-VERSION="1.3.2"
+VERSION="1.3.3"
 
 STEAMPLAY_HOME="${STEAMPLAY_HOME:-$HOME/.steamplay}"
 CONFIG_FILE="$STEAMPLAY_HOME/config"
@@ -912,6 +912,18 @@ cmd_config() {
     esac
 }
 
+cmd_ps() {
+    require_macos
+    msg "Wine 環境中執行的程式（Dock 上的 wine64-preloader 即這些程序的宿主）"
+    local out
+    out=$(pgrep -fl 'wine|\.exe' 2>/dev/null | grep -v pgrep || true)
+    if [[ -n "$out" ]]; then
+        printf '%s\n' "$out"
+    else
+        info "（沒有執行中的 Windows 程式）"
+    fi
+}
+
 cmd_kill() {
     require_macos
     local ws; ws=$(wineserver_bin)
@@ -1039,6 +1051,7 @@ ${c_bold}日常使用：${c_rst}
   steamplay steam                 啟動 Windows 版 Steam
   steamplay launch <AppID>        直接啟動某款遊戲（AppID 見 steamdb.info）
   steamplay run <exe> [args]      執行任意 Windows 程式
+  steamplay ps                    列出 Wine 環境中執行的程式
   steamplay kill                  強制關閉所有 Windows 程式
 
 ${c_bold}效能與相容性：${c_rst}
@@ -1084,6 +1097,7 @@ main() {
         gptk-libs)      cmd_gptk_libs "$@" ;;
         config)         cmd_config "$@" ;;
         prefix)         cmd_prefix "$@" ;;
+        ps)             cmd_ps "$@" ;;
         kill)           cmd_kill "$@" ;;
         logs)           cmd_logs "$@" ;;
         doctor)         cmd_doctor "$@" ;;
